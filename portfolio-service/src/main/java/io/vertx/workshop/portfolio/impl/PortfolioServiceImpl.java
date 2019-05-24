@@ -37,7 +37,7 @@ public class PortfolioServiceImpl implements PortfolioService {
 
 	@Override
 	public void getPortfolio(Handler<AsyncResult<Portfolio>> resultHandler) {
-		// TODO
+		// DONE
 		// ----
 		resultHandler.handle(Future.succeededFuture(portfolio));
 		;
@@ -45,7 +45,7 @@ public class PortfolioServiceImpl implements PortfolioService {
 	}
 
 	private void sendActionOnTheEventBus(String action, int amount, JsonObject quote, int newAmount) {
-		// TODO
+		// DONE
 		// ----
 		JsonObject jsonObject = new JsonObject().put("action", action).put("quote", quote)
 				.put("date", System.currentTimeMillis()).put("amount", amount)
@@ -57,7 +57,7 @@ public class PortfolioServiceImpl implements PortfolioService {
 
 	@Override
 	public void evaluate(Handler<AsyncResult<Double>> resultHandler) {
-		// TODO
+		// DONE
 		// ----
 		HttpEndpoint.getWebClient(discovery, new JsonObject().put("name", "quotes"), client -> {
 			if (client.failed()) {
@@ -89,7 +89,7 @@ public class PortfolioServiceImpl implements PortfolioService {
 		// retrieved
 		Future<Double> future = Future.future();
 
-		// TODO
+		// DONE
 		// ----
 		client.get("/?name=" + encode(company)).as(BodyCodec.jsonObject()).send(ar -> {
 			if (ar.succeeded()) {
