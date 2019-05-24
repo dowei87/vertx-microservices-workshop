@@ -1,8 +1,10 @@
 package io.vertx.workshop.portfolio.impl;
 
 import io.vertx.core.*;
+import io.vertx.core.buffer.Buffer;
 import io.vertx.core.json.JsonObject;
 import io.vertx.servicediscovery.ServiceDiscovery;
+import io.vertx.servicediscovery.types.HttpEndpoint;
 import io.vertx.workshop.portfolio.Portfolio;
 import io.vertx.workshop.portfolio.PortfolioService;
 
@@ -11,143 +13,169 @@ import java.net.URLEncoder;
 import java.util.List;
 import java.util.stream.Collectors;
 
+import com.hazelcast.core.Client;
+
+import io.vertx.ext.web.client.HttpRequest;
+import io.vertx.ext.web.client.HttpResponse;
 import io.vertx.ext.web.client.WebClient;
+import io.vertx.ext.web.codec.BodyCodec;
 
 /**
  * The portfolio service implementation.
  */
 public class PortfolioServiceImpl implements PortfolioService {
 
-  private final Vertx vertx;
-  private final Portfolio portfolio;
-  private final ServiceDiscovery discovery;
+	private final Vertx vertx;
+	private final Portfolio portfolio;
+	private final ServiceDiscovery discovery;
 
-  public PortfolioServiceImpl(Vertx vertx, ServiceDiscovery discovery, double initialCash) {
-    this.vertx = vertx;
-    this.portfolio = new Portfolio().setCash(initialCash);
-    this.discovery = discovery;
-  }
+	public PortfolioServiceImpl(Vertx vertx, ServiceDiscovery discovery, double initialCash) {
+		this.vertx = vertx;
+		this.portfolio = new Portfolio().setCash(initialCash);
+		this.discovery = discovery;
+	}
 
-  @Override
-  public void getPortfolio(Handler<AsyncResult<Portfolio>> resultHandler) {
-    // TODO
-    // ----
+	@Override
+	public void getPortfolio(Handler<AsyncResult<Portfolio>> resultHandler) {
+		// TODO
+		// ----
+		resultHandler.handle(Future.succeededFuture(portfolio));
+		;
+		// ----
+	}
 
-    // ----
-  }
+	private void sendActionOnTheEventBus(String action, int amount, JsonObject quote, int newAmount) {
+		// TODO
+		// ----
+		JsonObject jsonObject = new JsonObject().put("action", action).put("quote", quote)
+				.put("date", System.currentTimeMillis()).put("amount", amount)
+				.put("owned", portfolio.getAmount(quote.getString("name")));
 
-  private void sendActionOnTheEventBus(String action, int amount, JsonObject quote, int newAmount) {
-    // TODO
-    // ----
+		vertx.eventBus().publish(EVENT_ADDRESS, jsonObject);
+		// ----
+	}
 
-    // ----
-  }
+	@Override
+	public void evaluate(Handler<AsyncResult<Double>> resultHandler) {
+		// TODO
+		// ----
+		HttpEndpoint.getWebClient(discovery, new JsonObject().put("name", "quotes"), client -> {
+			if (client.failed()) {
+				Future.failedFuture(client.cause());
+			} else {
+				computeEvaluation(client.result(), resultHandler);
+			}
+		});
+		// ---
+	}
 
-  @Override
-  public void evaluate(Handler<AsyncResult<Double>> resultHandler) {
-    // TODO
-    // ----
+	private void computeEvaluation(WebClient webClient, Handler<AsyncResult<Double>> resultHandler) {
+		// We need to call the service for each company we own shares
+		List<Future> results = portfolio.getShares().entrySet().stream()
+				.map(entry -> getValueForCompany(webClient, entry.getKey(), entry.getValue()))
+				.collect(Collectors.toList());
 
-    // ---
-  }
+		// We need to return only when we have all results, for this we create a
+		// composite future. The set handler
+		// is called when all the futures has been assigned.
+		CompositeFuture.all(results).setHandler(ar -> {
+			double sum = results.stream().mapToDouble(fut -> (double) fut.result()).sum();
+			resultHandler.handle(Future.succeededFuture(sum));
+		});
+	}
 
-  private void computeEvaluation(WebClient webClient, Handler<AsyncResult<Double>> resultHandler) {
-    // We need to call the service for each company we own shares
-    List<Future> results = portfolio.getShares().entrySet().stream()
-        .map(entry -> getValueForCompany(webClient, entry.getKey(), entry.getValue()))
-        .collect(Collectors.toList());
+	private Future<Double> getValueForCompany(WebClient client, String company, int numberOfShares) {
+		// Create the future object that will get the value once the value have been
+		// retrieved
+		Future<Double> future = Future.future();
 
-    // We need to return only when we have all results, for this we create a composite future. The set handler
-    // is called when all the futures has been assigned.
-    CompositeFuture.all(results).setHandler(
-        ar -> {
-          double sum = results.stream().mapToDouble(fut -> (double) fut.result()).sum();
-          resultHandler.handle(Future.succeededFuture(sum));
-        });
-  }
+		// TODO
+		// ----
+		client.get("/?name=" + encode(company)).as(BodyCodec.jsonObject()).send(ar -> {
+			if (ar.succeeded()) {
+				HttpResponse<JsonObject> httpResponse = ar.result();
+				if (httpResponse.statusCode() == 200) {
+					double v = numberOfShares * httpResponse.body().getDouble("bid");
+					future.complete(v);
+				} else {
+					future.complete(0.0);
+				}
+			} else {
+				future.fail(ar.cause());
+			}
+		});
+		// ---
 
-  private Future<Double> getValueForCompany(WebClient client, String company, int numberOfShares) {
-    // Create the future object that will  get the value once the value have been retrieved
-    Future<Double> future = Future.future();
+		return future;
+	}
 
-    //TODO
-    //----
+	@Override
+	public void buy(int amount, JsonObject quote, Handler<AsyncResult<Portfolio>> resultHandler) {
+		if (amount <= 0) {
+			resultHandler.handle(Future.failedFuture(
+					"Cannot buy " + quote.getString("name") + " - the amount must be " + "greater than 0"));
+			return;
+		}
 
-    // ---
+		if (quote.getInteger("shares") < amount) {
+			resultHandler.handle(Future.failedFuture("Cannot buy " + amount + " - not enough "
+					+ "stocks on the market (" + quote.getInteger("shares") + ")"));
+			return;
+		}
 
-    return future;
-  }
+		double price = amount * quote.getDouble("ask");
+		String name = quote.getString("name");
+		// 1) do we have enough money
+		if (portfolio.getCash() >= price) {
+			// Yes, buy it
+			portfolio.setCash(portfolio.getCash() - price);
+			int current = portfolio.getAmount(name);
+			int newAmount = current + amount;
+			portfolio.getShares().put(name, newAmount);
+			sendActionOnTheEventBus("BUY", amount, quote, newAmount);
+			resultHandler.handle(Future.succeededFuture(portfolio));
+		} else {
+			resultHandler.handle(Future.failedFuture("Cannot buy " + amount + " of " + name + " - "
+					+ "not enough money, " + "need " + price + ", has " + portfolio.getCash()));
+		}
+	}
 
+	@Override
+	public void sell(int amount, JsonObject quote, Handler<AsyncResult<Portfolio>> resultHandler) {
+		if (amount <= 0) {
+			resultHandler.handle(Future.failedFuture(
+					"Cannot sell " + quote.getString("name") + " - the amount must be " + "greater than 0"));
+			return;
+		}
 
-  @Override
-  public void buy(int amount, JsonObject quote, Handler<AsyncResult<Portfolio>> resultHandler) {
-    if (amount <= 0) {
-      resultHandler.handle(Future.failedFuture("Cannot buy " + quote.getString("name") + " - the amount must be " +
-          "greater than 0"));
-      return;
-    }
+		double price = amount * quote.getDouble("bid");
+		String name = quote.getString("name");
+		int current = portfolio.getAmount(name);
+		// 1) do we have enough stocks
+		if (current >= amount) {
+			// Yes, sell it
+			int newAmount = current - amount;
+			if (newAmount == 0) {
+				portfolio.getShares().remove(name);
+			} else {
+				portfolio.getShares().put(name, newAmount);
+			}
+			portfolio.setCash(portfolio.getCash() + price);
+			sendActionOnTheEventBus("SELL", amount, quote, newAmount);
+			resultHandler.handle(Future.succeededFuture(portfolio));
+		} else {
+			resultHandler.handle(Future.failedFuture(
+					"Cannot sell " + amount + " of " + name + " - " + "not enough stocks " + "in portfolio"));
+		}
 
-    if (quote.getInteger("shares") < amount) {
-      resultHandler.handle(Future.failedFuture("Cannot buy " + amount + " - not enough " +
-          "stocks on the market (" + quote.getInteger("shares") + ")"));
-      return;
-    }
+	}
 
-    double price = amount * quote.getDouble("ask");
-    String name = quote.getString("name");
-    // 1) do we have enough money
-    if (portfolio.getCash() >= price) {
-      // Yes, buy it
-      portfolio.setCash(portfolio.getCash() - price);
-      int current = portfolio.getAmount(name);
-      int newAmount = current + amount;
-      portfolio.getShares().put(name, newAmount);
-      sendActionOnTheEventBus("BUY", amount, quote, newAmount);
-      resultHandler.handle(Future.succeededFuture(portfolio));
-    } else {
-      resultHandler.handle(Future.failedFuture("Cannot buy " + amount + " of " + name + " - " + "not enough money, " +
-          "need " + price + ", has " + portfolio.getCash()));
-    }
-  }
-
-
-  @Override
-  public void sell(int amount, JsonObject quote, Handler<AsyncResult<Portfolio>> resultHandler) {
-    if (amount <= 0) {
-      resultHandler.handle(Future.failedFuture("Cannot sell " + quote.getString("name") + " - the amount must be " +
-          "greater than 0"));
-      return;
-    }
-
-    double price = amount * quote.getDouble("bid");
-    String name = quote.getString("name");
-    int current = portfolio.getAmount(name);
-    // 1) do we have enough stocks
-    if (current >= amount) {
-      // Yes, sell it
-      int newAmount = current - amount;
-      if (newAmount == 0) {
-        portfolio.getShares().remove(name);
-      } else {
-        portfolio.getShares().put(name, newAmount);
-      }
-      portfolio.setCash(portfolio.getCash() + price);
-      sendActionOnTheEventBus("SELL", amount, quote, newAmount);
-      resultHandler.handle(Future.succeededFuture(portfolio));
-    } else {
-      resultHandler.handle(Future.failedFuture("Cannot sell " + amount + " of " + name + " - " + "not enough stocks " +
-          "in portfolio"));
-    }
-
-  }
-
-  private static String encode(String value) {
-    try {
-      return URLEncoder.encode(value, "UTF-8");
-    } catch (UnsupportedEncodingException e) {
-      throw new RuntimeException("Unsupported encoding");
-    }
-  }
-
+	private static String encode(String value) {
+		try {
+			return URLEncoder.encode(value, "UTF-8");
+		} catch (UnsupportedEncodingException e) {
+			throw new RuntimeException("Unsupported encoding");
+		}
+	}
 
 }
